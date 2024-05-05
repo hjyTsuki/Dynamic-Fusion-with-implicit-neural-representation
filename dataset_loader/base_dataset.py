@@ -9,7 +9,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data._utils.collate import default_collate
 
-from transforms.tensor_ops import cus_sample
+from dataset_loader.transforms.tensor_ops import cus_sample
 
 
 class _BaseSODDataset(Dataset):

@@ -39,14 +39,15 @@ start_epoch = 1
 parser = argparse.ArgumentParser(description='Image Deraininig')
 
 parser.add_argument('--datasets_config', default='./configs/datasetsconfig.json', type=str, help='datasets')
-parser.add_argument('--train_datasets', default='vt5000_tr', type=str, help='Directory of train images')
-parser.add_argument('--model_save_dir', default='/data0/chenxiang/code/CVPR2024/checkpoints/', type=str, help='Path to save weights')
+parser.add_argument('--train_dataset_name', default='vt5000_tr', type=str, help='Directory of train images')
+parser.add_argument('--test_dataset_name', default='vt5000_te', type=str, help='Directory of train images')
+parser.add_argument('--model_save_dir', default='/result/checkpoints/', type=str, help='Path to save weights')
 parser.add_argument('--pretrain_weights', default='', type=str, help='Path to pretrain-weights')
 parser.add_argument('--mode', default='Salient', type=str)
 parser.add_argument('--session', default='SingleScale', type=str, help='session')
 parser.add_argument('--patch_size', default=256, type=int, help='patch size')
-parser.add_argument('--num_epochs', default=3000, type=int, help='num_epochs')
-parser.add_argument('--batch_size', default=8, type=int, help='batch_size')
+parser.add_argument('--num_epochs', default=100, type=int, help='num_epochs')
+parser.add_argument('--batch_size', default=1, type=int, help='batch_size')
 args = parser.parse_args()
 
 mode = args.mode
@@ -57,13 +58,15 @@ model_dir = os.path.join(args.model_save_dir, mode, 'models', session)
 utils.mkdir(model_dir)
 
 dataset_config = args.datasets_config
-train_datasets = args.train_datasets
-
+train_dataset_name = args.train_dataset_name
+test_dataset_name = args.test_dataset_name
 num_epochs = args.num_epochs
+val_epochs = 100
 batch_size = args.batch_size
 
-start_lr = 1e-4
+start_lr = 0.05
 end_lr = 1e-6
+img_shape = {'h': 384, 'w': 384}
 
 ######### Model ###########
 model_restoration = myNet()
@@ -114,16 +117,21 @@ if len(device_ids) > 1:
     model_restoration = nn.DataParallel(model_restoration, device_ids=device_ids)
 
 ######### Loss ###########
-criterion_char = losses.CharbonnierLoss()
-criterion_edge = losses.EdgeLoss()
-criterion_fft = losses.fftLoss()
-criterion_L1 = nn.L1Loss(size_average=True)
+criterion_BCE = losses.BCEloss()
+criterion_UAL = losses.UALloss()
 
 ######### DataLoaders ###########
 with open(dataset_config, 'r', encoding='utf-8') as file:
     datasets_cfg = json.load(file)
-train_dataset = get_training_data(list(datasets_cfg[train_datasets]))
+datasets_cfg_train = tuple((train_dataset_name, datasets_cfg[train_dataset_name]))
+datasets_cfg_train = [datasets_cfg_train]
+train_dataset = get_training_data(datasets_cfg_train, img_shape)
 train_loader = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True, num_workers=0, drop_last=False,
+                          pin_memory=True)
+datasets_cfg_test = tuple((test_dataset_name, datasets_cfg[test_dataset_name]))
+datasets_cfg_test = [datasets_cfg_test]
+val_dataset = get_training_data(datasets_cfg_test, img_shape)
+val_loader = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True, num_workers=0, drop_last=False,
                           pin_memory=True)
 
 
@@ -146,28 +154,56 @@ for epoch in range(start_epoch, num_epochs + 1):
         # zero_grad
         for param in model_restoration.parameters():
             param.grad = None
+        data = data['data']
+        target_ = data['mask'].cuda()
+        input_rgb = data['image1.0'].cuda()
+        input_thermal = data['thermal'].cuda()
 
-        target_ = data[0].cuda()
-        input_ = data[1].cuda()
         target = kornia.geometry.transform.build_pyramid(target_, 3)
-        restored = model_restoration(input_)
+        restored = model_restoration(input_rgb, input_thermal)
 
-        loss_fft = criterion_fft(restored[0], target[0]) + criterion_fft(restored[1], target[1]) + criterion_fft(restored[2], target[2])
-        loss_char = criterion_char(restored[0], target[0]) + criterion_char(restored[1], target[1]) + criterion_char(restored[2], target[2])
-        loss_edge = criterion_edge(restored[0], target[0]) + criterion_edge(restored[1], target[1]) + criterion_edge(restored[2], target[2])
-        loss_l1 = criterion_L1(restored[3], target[1]) + criterion_L1(restored[5], target[2])
-        loss = loss_char + 0.01 * loss_fft + 0.05 * loss_edge + 0.1 * loss_l1
+        loss_bce = criterion_BCE(restored, target_)
+        loss_ual = criterion_UAL(restored, target_)
+        loss = loss_bce + loss_ual
         loss.backward()
         optimizer.step()
         epoch_loss += loss.item()
         iter += 1
-        writer.add_scalar('loss/fft_loss', loss_fft, iter)
-        writer.add_scalar('loss/char_loss', loss_char, iter)
-        writer.add_scalar('loss/edge_loss', loss_edge, iter)
-        writer.add_scalar('loss/l1_loss', loss_l1, iter)
+        writer.add_scalar('loss/bce_loss', loss_bce, iter)
+        writer.add_scalar('loss/ual_loss', loss_bce, iter)
         writer.add_scalar('loss/iter_loss', loss, iter)
     writer.add_scalar('loss/epoch_loss', epoch_loss, epoch)
 
+    #### Evaluation ####
+    if epoch % val_epochs == 0:
+        model_restoration.eval()
+        psnr_val_rgb = []
+        for ii, data_val in enumerate((val_loader), 0):
+            target = data_val[0].cuda()
+            input_ = data_val[1].cuda()
+
+            with torch.no_grad():
+                restored = model_restoration(input_)
+
+            for res, tar in zip(restored[0], target):
+                psnr_val_rgb.append(utils.torchPSNR(res, tar))
+
+        psnr_val_rgb = torch.stack(psnr_val_rgb).mean().item()
+        writer.add_scalar('val/psnr', psnr_val_rgb, epoch)
+        if psnr_val_rgb > best_psnr:
+            best_psnr = psnr_val_rgb
+            best_epoch = epoch
+            torch.save({'epoch': epoch,
+                        'state_dict': model_restoration.state_dict(),
+                        'optimizer': optimizer.state_dict()
+                        }, os.path.join(model_dir, "model_best.pth"))
+
+        print("[epoch %d PSNR: %.4f --- best_epoch %d Best_PSNR %.4f]" % (epoch, psnr_val_rgb, best_epoch, best_psnr))
+
+        torch.save({'epoch': epoch,
+                    'state_dict': model_restoration.state_dict(),
+                    'optimizer': optimizer.state_dict()
+                    }, os.path.join(model_dir, f"model_epoch_{epoch}.pth"))
     scheduler.step()
 
     print("------------------------------------------------------------------")

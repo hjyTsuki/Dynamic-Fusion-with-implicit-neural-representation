@@ -1,6 +1,38 @@
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from dataset_loader.transforms.tensor_ops import cus_sample
+
+
+def get_coef(iter_percentage, method):
+    if method == "linear":
+        milestones = (0.3, 0.7)
+        coef_range = (0, 1)
+        min_point, max_point = min(milestones), max(milestones)
+        min_coef, max_coef = min(coef_range), max(coef_range)
+        if iter_percentage < min_point:
+            ual_coef = min_coef
+        elif iter_percentage > max_point:
+            ual_coef = max_coef
+        else:
+            ratio = (max_coef - min_coef) / (max_point - min_point)
+            ual_coef = ratio * (iter_percentage - min_point)
+    elif method == "cos":
+        coef_range = (0, 1)
+        min_coef, max_coef = min(coef_range), max(coef_range)
+        normalized_coef = (1 - np.cos(iter_percentage * np.pi)) / 2
+        ual_coef = normalized_coef * (max_coef - min_coef) + min_coef
+    else:
+        ual_coef = 1.0
+    return ual_coef
+
+def cal_ual(seg_logits, seg_gts):
+    assert seg_logits.shape == seg_gts.shape, (seg_logits.shape, seg_gts.shape)
+    sigmoid_x = seg_logits.sigmoid()
+    loss_map = 1 - (2 * sigmoid_x - 1).abs().pow(2)
+    return loss_map.mean()
 
 class CharbonnierLoss(nn.Module):
     """Charbonnier Loss (L1)"""
@@ -49,3 +81,27 @@ class fftLoss(nn.Module):
         diff = torch.fft.fft2(x.to('cuda:0')) - torch.fft.fft2(y.to('cuda:0'))
         loss = torch.mean(abs(diff))
         return loss
+
+class BCEloss(nn.Module):
+    def __init__(self):
+        super(BCEloss, self).__init__()
+
+    def forward(self, pred: torch.Tensor, gts: torch.Tensor, method="cos", iter_percentage: float = 0):
+        resized_gts = cus_sample(gts, mode="size", factors=pred.shape[2:])
+        sod_loss = F.binary_cross_entropy_with_logits(input=pred, target=resized_gts, reduction="mean")
+        return sod_loss
+
+
+class UALloss(nn.Module):
+    def __init__(self):
+        super(UALloss, self).__init__()
+
+
+    def forward(self, pred: torch.Tensor, gts: torch.Tensor, method="cos", iter_percentage: float = 0):
+        resized_gts = cus_sample(gts, mode="size", factors=pred.shape[2:])
+        ual_coef = get_coef(iter_percentage, method)
+        ual_loss = cal_ual(seg_logits=pred, seg_gts=resized_gts)
+        ual_loss *= ual_coef
+        return ual_loss
+
+

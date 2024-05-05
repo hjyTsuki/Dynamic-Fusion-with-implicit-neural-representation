@@ -505,12 +505,13 @@ class DecoderTransformer(nn.Module):
         out_dec_level2 = self.decoder_level2_max1(inp_dec_level2)
 
         inp_dec_level1 = self.up2_1_max(out_dec_level2)
-        inp_dec_level1 = torch.cat([inp_dec_level1, inp_features[-2]], 1)
+        inp_dec_level1 = torch.cat([inp_dec_level1, inp_features[0]], 1)
         inp_dec_level1 = self.reduce_chan_level1_max1(inp_dec_level1)
         out_dec_level1 = self.decoder_level1_max1(inp_dec_level1)
 
         out_dec_level1 = self.output_max_context1(out_dec_level1)
-        return out_dec_level1
+        out_ = self.output_max(out_dec_level1)
+        return out_
 
 
 class DynamicFusion(nn.Module):
@@ -582,7 +583,7 @@ class Net(nn.Module):
         return output.sigmoid()
 
 if __name__ == '__main__':
-    img_rgb, img_thermal = torch.randn(2, 3, 224, 224), torch.randn(2, 3, 224, 224)
+    img_rgb, img_thermal = torch.randn(1, 3, 384, 384), torch.randn(1, 3, 384, 384)
     img_rgb = img_rgb.to(torch.device('cuda:0'))
     img_thermal = img_thermal.to(torch.device('cuda:0'))
     model = Net().cuda()
