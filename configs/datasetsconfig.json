@@ -1,0 +1,59 @@
+{
+  "vt1000": {
+    "root": "D:\\Yang\\datasets\\VT1000\\VT1000",
+    "image": {
+      "path": "RGB",
+      "suffix": ".jpg"
+    },
+    "mask": {
+      "path": "GT",
+      "suffix": ".jpg"
+    },
+    "thermal": {
+      "path": "T",
+      "suffix": ".jpg"
+    },
+    "edge": {
+      "path": "GT_Edge",
+      "suffix": ".png"
+    }
+  },
+  "vt5000_tr": {
+    "root": "D:\\Yang\\datasets\\VT5000\\VT5000\\Train",
+    "image": {
+      "path": "RGB",
+      "suffix": ".jpg"
+    },
+    "mask": {
+      "path": "GT",
+      "suffix": ".png"
+    },
+    "thermal": {
+      "path": "T",
+      "suffix": ".jpg"
+    },
+    "edge": {
+      "path": "GT_Edge",
+      "suffix": ".png"
+    }
+  },
+  "vt5000_te": {
+    "root": "D:\\Yang\\datasets\\VT5000\\VT5000\\Test",
+    "image": {
+      "path": "RGB",
+      "suffix": ".jpg"
+    },
+    "mask": {
+      "path": "GT",
+      "suffix": ".png"
+    },
+    "thermal": {
+      "path": "T",
+      "suffix": ".jpg"
+    },
+    "edge": {
+      "path": "GT_Edge",
+      "suffix": ".png"
+    }
+  }
+}
