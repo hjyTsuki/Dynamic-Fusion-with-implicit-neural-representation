@@ -17,7 +17,7 @@ def to_4d(x, h, w):
 class InvertedResidualBlock(nn.Module):
     def __init__(self, inp, oup, expand_ratio):
         super(InvertedResidualBlock, self).__init__()
-        hidden_dim = int(inp * expand_ratio)
+        hidden_dim = int(inp // expand_ratio)
         self.bottleneckBlock = nn.Sequential(
             # pw
             nn.Conv2d(inp, hidden_dim, 1, bias=False),
@@ -44,15 +44,15 @@ class DetailNode(nn.Module):
                  ):
         super(DetailNode, self).__init__()
         # Scale is Ax + b, i.e. affine transformation
-        self.theta_phi = InvertedResidualBlock(inp=inp_dim * 2, oup=inp_dim * 2, expand_ratio=2)
-        self.theta_rho = InvertedResidualBlock(inp=inp_dim * 2, oup=inp_dim, expand_ratio=2)
-        self.theta_eta = InvertedResidualBlock(inp=inp_dim, oup=out_dim, expand_ratio=2)
+        self.theta_phi = InvertedResidualBlock(inp=inp_dim * 2, oup=out_dim, expand_ratio=2)
+        # self.theta_rho = InvertedResidualBlock(inp=inp_dim * 2, oup=inp_dim, expand_ratio=2)
+        # self.theta_eta = InvertedResidualBlock(inp=inp_dim, oup=out_dim, expand_ratio=2)
 
     def forward(self, xr, xt):
         x = torch.cat([xr, xt], dim=1)
         x = self.theta_phi(x)
-        x = self.theta_rho(x)
-        x = self.theta_eta(x)
+        # x = self.theta_rho(x)
+        # x = self.theta_eta(x)
         return x
 
 
@@ -531,9 +531,9 @@ class DynamicFusion(nn.Module):
             xr = rgb_feature_list[i]
             xt = thermal_feature_list[i]
             gate = getattr(self, f'fusion_stage{i}')
-            dynamic = gate(xr, xt)
+            dynamic = gate(xr, xt).sigmoid()
             INR_Trans = getattr(self, f'INR{i}')
-            dynamic = INR_Trans(dynamic).sigmoid()
+            dynamic = (dynamic + INR_Trans(dynamic)).sigmoid()
             fused = xr * dynamic + xt * (1 - dynamic)
             fused_list.append(fused)
         return fused_list

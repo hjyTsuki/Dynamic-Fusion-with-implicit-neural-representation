@@ -86,7 +86,7 @@ class BCEloss(nn.Module):
     def __init__(self):
         super(BCEloss, self).__init__()
 
-    def forward(self, pred: torch.Tensor, gts: torch.Tensor, method="cos", iter_percentage: float = 0):
+    def forward(self, pred: torch.Tensor, gts: torch.Tensor):
         resized_gts = cus_sample(gts, mode="size", factors=pred.shape[2:])
         sod_loss = F.binary_cross_entropy_with_logits(input=pred, target=resized_gts, reduction="mean")
         return sod_loss

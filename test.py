@@ -1,3 +1,4 @@
+import json
 import os
 import argparse
 import torch.nn as nn
@@ -6,15 +7,15 @@ from torch.utils.data import DataLoader
 import utils
 from data_RGB import get_test_data
 from model import MultiscaleNet as mynet
-#from model_S import MultiscaleNet as myNet
-from skimage import img_as_ubyte
+
 from get_parameter_number import get_parameter_number
 from tqdm import tqdm
 from layers import *
 
 parser = argparse.ArgumentParser(description='Image Deraining')
-parser.add_argument('--input_dir', default='/data0/chenxiang/code/CVPR2024/Datasets/Rain200L/test/input/', type=str, help='Directory of validation images')
-parser.add_argument('--output_dir', default='./results/Rain200L', type=str, help='Directory of validation images')
+parser.add_argument('--datasets_config', default='./configs/datasetsconfig.json', type=str, help='datasets')
+parser.add_argument('--test_dataset_name', default='vt5000_te', type=str, help='Directory of train images')
+parser.add_argument('--output_dir', default='./results/VT5000', type=str, help='Directory of validation images')
 parser.add_argument('--weights', default='', type=str, help='Path to weights') 
 parser.add_argument('--gpus', default='0', type=str, help='CUDA_VISIBLE_DEVICES')
 parser.add_argument('--win_size', default=256, type=int, help='window size')
@@ -31,11 +32,18 @@ model_restoration.cuda()
 model_restoration = nn.DataParallel(model_restoration)
 model_restoration.eval()
 
-# dataset = args.dataset
-rgb_dir_test = args.input_dir
-test_dataset = get_test_data(rgb_dir_test, img_options={})
-test_loader  = DataLoader(dataset=test_dataset, batch_size=1, shuffle=False, num_workers=4, drop_last=False, pin_memory=True)
+img_shape = {'h': 384, 'w': 384}
 
+# dataset = args.dataset
+dataset_config = args.dataset_config
+test_dataset_name = args.test_dataset_name
+with open(dataset_config, 'r', encoding='utf-8') as file:
+    datasets_cfg = json.load(file)
+datasets_cfg_test = tuple((test_dataset_name, datasets_cfg[test_dataset_name]))
+datasets_cfg_test = [datasets_cfg_test]
+train_dataset = get_test_data(datasets_cfg_test, img_shape)
+train_loader = DataLoader(dataset=train_dataset, batch_size=1, shuffle=False, num_workers=4, drop_last=False,
+                          pin_memory=True)
 
 utils.mkdir(result_dir)
 

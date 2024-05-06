@@ -8,6 +8,5 @@ def get_validation_data(rgb_dir, img_options):
     assert os.path.exists(rgb_dir)
     return DataLoaderVal(rgb_dir, img_options)
 
-def get_test_data(rgb_dir, img_options):
-    assert os.path.exists(rgb_dir)
-    return DataLoaderTest(rgb_dir, img_options)
+def get_test_data(cfg, img_shape):
+    return RGBT_TestDataset(cfg, img_shape)

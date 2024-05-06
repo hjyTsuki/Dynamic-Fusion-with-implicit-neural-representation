@@ -18,6 +18,7 @@ import numpy as np
 
 import utils
 from data_RGB import get_training_data, get_validation_data
+# from methods.vit import ViT as myNet
 from methods.net import Net as myNet
 import losses
 from warmup_scheduler import GradualWarmupScheduler
@@ -64,11 +65,12 @@ num_epochs = args.num_epochs
 val_epochs = 100
 batch_size = args.batch_size
 
-start_lr = 0.05
+start_lr = 1e-3
 end_lr = 1e-6
 img_shape = {'h': 384, 'w': 384}
 
 ######### Model ###########
+
 model_restoration = myNet()
 
 # print number of model
