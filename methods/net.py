@@ -1,8 +1,12 @@
+import collections
+from itertools import repeat
 import torch
 from torch import nn
 from torch.nn import functional as F
 import numbers
 from einops import rearrange
+
+from dataset_loader.transforms.tensor_ops import cus_sample
 from mlp import INR
 
 
@@ -13,7 +17,14 @@ def to_3d(x):
 def to_4d(x, h, w):
     return rearrange(x, 'b (h w) c -> b c h w', h=h, w=w)
 
+def _ntuple(n):
+    def parse(x):
+        if isinstance(x, collections.abc.Iterable):
+            return x
+        return tuple(repeat(x, n))
+    return parse
 
+to_2tuple = _ntuple(2)
 class InvertedResidualBlock(nn.Module):
     def __init__(self, inp, oup, expand_ratio):
         super(InvertedResidualBlock, self).__init__()
@@ -30,7 +41,7 @@ class InvertedResidualBlock(nn.Module):
             nn.ReLU6(inplace=True),
             # pw-linear
             nn.Conv2d(hidden_dim, oup, 1, bias=False),
-            # nn.BatchNorm2d(oup),
+            nn.BatchNorm2d(oup),
         )
 
     def forward(self, x):
@@ -44,16 +55,72 @@ class DetailNode(nn.Module):
                  ):
         super(DetailNode, self).__init__()
         # Scale is Ax + b, i.e. affine transformation
-        self.theta_phi = InvertedResidualBlock(inp=inp_dim * 2, oup=out_dim, expand_ratio=2)
-        # self.theta_rho = InvertedResidualBlock(inp=inp_dim * 2, oup=inp_dim, expand_ratio=2)
+        # self.theta_phi = InvertedResidualBlock(inp=inp_dim, oup=inp_dim, expand_ratio=2)
+        # self.theta_rho = InvertedResidualBlock(inp=inp_dim, oup=out_dim, expand_ratio=2)
+        self.bottlenect = nn.Sequential(
+            InvertedResidualBlock(inp=inp_dim, oup=inp_dim // 2, expand_ratio=2),
+            InvertedResidualBlock(inp=inp_dim // 2, oup=out_dim, expand_ratio=2)
+        )
         # self.theta_eta = InvertedResidualBlock(inp=inp_dim, oup=out_dim, expand_ratio=2)
 
     def forward(self, xr, xt):
-        x = torch.cat([xr, xt], dim=1)
-        x = self.theta_phi(x)
-        # x = self.theta_rho(x)
-        # x = self.theta_eta(x)
-        return x
+        gamma_xr = self.bottlenect(xr)
+        gamma_xt = self.bottlenect(xt)
+
+        dynamic = torch.cat([gamma_xr, gamma_xt], dim=1)
+
+        return dynamic
+
+class ConvBNReLU(nn.Sequential):
+    def __init__(
+        self,
+        in_planes,
+        out_planes,
+        kernel_size,
+        stride=1,
+        padding=0,
+        dilation=1,
+        groups=1,
+        bias=False,
+        act_name="relu",
+        is_transposed=False,
+    ):
+        """
+        Convolution-BatchNormalization-ActivationLayer
+
+        :param in_planes:
+        :param out_planes:
+        :param kernel_size:
+        :param stride:
+        :param padding:
+        :param dilation:
+        :param groups:
+        :param bias:
+        :param act_name: None denote it doesn't use the activation layer.
+        :param is_transposed: True -> nn.ConvTranspose2d, False -> nn.Conv2d
+        """
+        super().__init__()
+        if is_transposed:
+            conv_module = nn.ConvTranspose2d
+        else:
+            conv_module = nn.Conv2d
+        self.add_module(
+            name="conv",
+            module=conv_module(
+                in_planes,
+                out_planes,
+                kernel_size=kernel_size,
+                stride=to_2tuple(stride),
+                padding=to_2tuple(padding),
+                dilation=to_2tuple(dilation),
+                groups=groups,
+                bias=bias,
+            ),
+        )
+        self.add_module(name="bn", module=nn.BatchNorm2d(out_planes))
+        if act_name is not None:
+            self.add_module(name=act_name, module=nn.ReLU())
+
 
 
 class BasicConv(nn.Module):
@@ -272,161 +339,6 @@ class Fusion(nn.Module):
         return x_s
 
 
-class MultiscaleNet(nn.Module):
-    def __init__(self,
-                 inp_channels=3,
-                 out_channels=3,
-                 dim=48,
-                 num_blocks=[2, 3, 3],
-                 heads=[1, 2, 4],
-                 ffn_expansion_factor=2.66,
-                 bias=False,
-                 LayerNorm_type='WithBias',
-                 ):
-        super(MultiscaleNet, self).__init__()
-
-        self.patch_embed_max = OverlapPatchEmbed(inp_channels, dim)
-
-        self.encoder_level1_max1 = nn.Sequential(*[
-            TransformerBlock(dim=dim, num_heads=heads[0], ffn_expansion_factor=ffn_expansion_factor, bias=bias,
-                             LayerNorm_type=LayerNorm_type) for i in range(num_blocks[0])])
-        self.encoder_level1_max2 = nn.Sequential(*[
-            TransformerBlock(dim=dim, num_heads=heads[0], ffn_expansion_factor=ffn_expansion_factor, bias=bias,
-                             LayerNorm_type=LayerNorm_type) for i in range(num_blocks[0])])
-        self.encoder_level1_max3 = nn.Sequential(*[
-            TransformerBlock(dim=dim, num_heads=heads[0], ffn_expansion_factor=ffn_expansion_factor, bias=bias,
-                             LayerNorm_type=LayerNorm_type) for i in range(num_blocks[0])])
-
-        self.down1_2_max = Downsample(dim)
-        self.down1_2_max2 = Downsample(dim)
-        self.down1_2_max3 = Downsample(dim)
-        self.encoder_level2_max1 = nn.Sequential(*[
-            TransformerBlock(dim=int(dim * 2 ** 1), num_heads=heads[1], ffn_expansion_factor=ffn_expansion_factor,
-                             bias=bias, LayerNorm_type=LayerNorm_type) for i in range(num_blocks[1])])
-        self.encoder_level2_max2 = nn.Sequential(*[
-            TransformerBlock(dim=int(dim * 2 ** 1), num_heads=heads[1], ffn_expansion_factor=ffn_expansion_factor,
-                             bias=bias, LayerNorm_type=LayerNorm_type) for i in range(num_blocks[1])])
-        self.encoder_level2_max3 = nn.Sequential(*[
-            TransformerBlock(dim=int(dim * 2 ** 1), num_heads=heads[1], ffn_expansion_factor=ffn_expansion_factor,
-                             bias=bias, LayerNorm_type=LayerNorm_type) for i in range(num_blocks[1])])
-
-        self.down2_3_max = Downsample(int(dim * 2 ** 1))
-        self.down2_3_max2 = Downsample(int(dim * 2 ** 1))
-        self.down2_3_max3 = Downsample(int(dim * 2 ** 1))
-        self.latent_max1 = nn.Sequential(*[
-            TransformerBlock(dim=int(dim * 2 ** 2), num_heads=heads[2], ffn_expansion_factor=ffn_expansion_factor,
-                             bias=bias, LayerNorm_type=LayerNorm_type) for i in range(num_blocks[2])])
-        self.latent_max2 = nn.Sequential(*[
-            TransformerBlock(dim=int(dim * 2 ** 2), num_heads=heads[2], ffn_expansion_factor=ffn_expansion_factor,
-                             bias=bias, LayerNorm_type=LayerNorm_type) for i in range(num_blocks[2])])
-        self.latent_max3 = nn.Sequential(*[
-            TransformerBlock(dim=int(dim * 2 ** 2), num_heads=heads[2], ffn_expansion_factor=ffn_expansion_factor,
-                             bias=bias, LayerNorm_type=LayerNorm_type) for i in range(num_blocks[2])])
-
-        self.up3_2_max = Upsample(int(dim * 2 ** 2))
-        self.up3_2_max2 = Upsample(int(dim * 2 ** 2))
-        self.up3_2_max3 = Upsample(int(dim * 2 ** 2))
-        self.reduce_chan_level2_max1 = nn.Conv2d(int(dim * 2 ** 2), int(dim * 2 ** 1), kernel_size=1, bias=bias)
-        self.reduce_chan_level2_max2 = nn.Conv2d(int(dim * 2 ** 2), int(dim * 2 ** 1), kernel_size=1, bias=bias)
-        self.reduce_chan_level2_max3 = nn.Conv2d(int(dim * 2 ** 2), int(dim * 2 ** 1), kernel_size=1, bias=bias)
-        self.decoder_level2_max1 = nn.Sequential(*[
-            TransformerBlock(dim=int(dim * 2 ** 1), num_heads=heads[1], ffn_expansion_factor=ffn_expansion_factor,
-                             bias=bias, LayerNorm_type=LayerNorm_type) for i in range(num_blocks[1])])
-        self.decoder_level2_max2 = nn.Sequential(*[
-            TransformerBlock(dim=int(dim * 2 ** 1), num_heads=heads[1], ffn_expansion_factor=ffn_expansion_factor,
-                             bias=bias, LayerNorm_type=LayerNorm_type) for i in range(num_blocks[1])])
-        self.decoder_level2_max3 = nn.Sequential(*[
-            TransformerBlock(dim=int(dim * 2 ** 1), num_heads=heads[1], ffn_expansion_factor=ffn_expansion_factor,
-                             bias=bias, LayerNorm_type=LayerNorm_type) for i in range(num_blocks[1])])
-
-        self.up2_1_max = Upsample(int(dim * 2 ** 1))
-        self.up2_1_max2 = Upsample(int(dim * 2 ** 1))
-        self.up2_1_max3 = Upsample(int(dim * 2 ** 1))
-        self.reduce_chan_level1_max1 = nn.Conv2d(int(dim * 2 ** 1), int(dim * 1 ** 1), kernel_size=1, bias=bias)
-        self.reduce_chan_level1_max2 = nn.Conv2d(int(dim * 2 ** 1), int(dim * 1 ** 1), kernel_size=1, bias=bias)
-        self.reduce_chan_level1_max3 = nn.Conv2d(int(dim * 2 ** 1), int(dim * 1 ** 1), kernel_size=1, bias=bias)
-        self.decoder_level1_max1 = nn.Sequential(*[
-            TransformerBlock(dim=int(dim * 1 ** 1), num_heads=heads[0], ffn_expansion_factor=ffn_expansion_factor,
-                             bias=bias, LayerNorm_type=LayerNorm_type) for i in range(num_blocks[0])])
-        self.decoder_level1_max2 = nn.Sequential(*[
-            TransformerBlock(dim=int(dim * 1 ** 1), num_heads=heads[0], ffn_expansion_factor=ffn_expansion_factor,
-                             bias=bias, LayerNorm_type=LayerNorm_type) for i in range(num_blocks[0])])
-        self.decoder_level1_max3 = nn.Sequential(*[
-            TransformerBlock(dim=int(dim * 1 ** 1), num_heads=heads[0], ffn_expansion_factor=ffn_expansion_factor,
-                             bias=bias, LayerNorm_type=LayerNorm_type) for i in range(num_blocks[0])])
-
-        self.output_max = nn.Conv2d(int(dim * 1 ** 1), out_channels, kernel_size=3, stride=1, padding=1, bias=bias)
-        self.output_max_context1 = nn.Conv2d(int(dim * 1 ** 1), dim, kernel_size=3, stride=1, padding=1, bias=bias)
-        self.output_max_context2 = nn.Conv2d(int(dim * 1 ** 1), dim, kernel_size=3, stride=1, padding=1, bias=bias)
-
-    def forward(self, inp_img):
-        outputs = list()
-
-        inp_enc_level1_max = self.patch_embed_max(inp_img)
-        out_enc_level1_max = self.encoder_level1_max1(inp_enc_level1_max)
-
-        inp_enc_level2_max = self.down1_2_max(out_enc_level1_max)
-        out_enc_level2_max = self.encoder_level2_max1(inp_enc_level2_max)
-
-        inp_enc_level4_max = self.down2_3_max(out_enc_level2_max)
-        latent_max = self.latent_max1(inp_enc_level4_max)
-
-        inp_dec_level2_max = self.up3_2_max(latent_max)
-        inp_dec_level2_max = torch.cat([inp_dec_level2_max, out_enc_level2_max], 1)
-        inp_dec_level2_max = self.reduce_chan_level2_max1(inp_dec_level2_max)
-        out_dec_level2_max = self.decoder_level2_max1(inp_dec_level2_max)
-
-        inp_dec_level1_max = self.up2_1_max(out_dec_level2_max)
-        inp_dec_level1_max = torch.cat([inp_dec_level1_max, out_enc_level1_max], 1)
-        inp_dec_level1_max = self.reduce_chan_level1_max1(inp_dec_level1_max)
-        out_dec_level1_max = self.decoder_level1_max1(inp_dec_level1_max)
-
-        out_dec_level1_max = self.output_max_context1(out_dec_level1_max)
-        out_enc_level1_max = self.encoder_level1_max2(out_dec_level1_max)
-
-        inp_enc_level2_max = self.down1_2_max2(out_enc_level1_max)
-        out_enc_level2_max = self.encoder_level2_max2(inp_enc_level2_max)
-
-        inp_enc_level4_max = self.down2_3_max2(out_enc_level2_max)
-        latent_max = self.latent_max2(inp_enc_level4_max)
-
-        inp_dec_level2_max = self.up3_2_max2(latent_max)
-        inp_dec_level2_max = torch.cat([inp_dec_level2_max, out_enc_level2_max], 1)
-        inp_dec_level2_max = self.reduce_chan_level2_max2(inp_dec_level2_max)
-        out_dec_level2_max = self.decoder_level2_max2(inp_dec_level2_max)
-
-        inp_dec_level1_max = self.up2_1_max2(out_dec_level2_max)
-        inp_dec_level1_max = torch.cat([inp_dec_level1_max, out_enc_level1_max], 1)
-        inp_dec_level1_max = self.reduce_chan_level1_max2(inp_dec_level1_max)
-        out_dec_level1_max = self.decoder_level1_max2(inp_dec_level1_max)
-
-        out_dec_level1_max = self.output_max_context2(out_dec_level1_max)
-        out_enc_level1_max = self.encoder_level1_max3(out_dec_level1_max)
-
-        inp_enc_level2_max = self.down1_2_max3(out_enc_level1_max)
-        out_enc_level2_max = self.encoder_level2_max3(inp_enc_level2_max)
-
-        inp_enc_level4_max = self.down2_3_max3(out_enc_level2_max)
-        latent_max = self.latent_max3(inp_enc_level4_max)
-
-        inp_dec_level2_max = self.up3_2_max3(latent_max)
-
-        inp_dec_level2_max = torch.cat([inp_dec_level2_max, out_enc_level2_max], 1)
-        inp_dec_level2_max = self.reduce_chan_level2_max3(inp_dec_level2_max)
-        out_dec_level2_max = self.decoder_level2_max3(inp_dec_level2_max)
-
-        inp_dec_level1_max = self.up2_1_max3(out_dec_level2_max)
-        inp_dec_level1_max = torch.cat([inp_dec_level1_max, out_enc_level1_max], 1)
-        inp_dec_level1_max = self.reduce_chan_level1_max2(inp_dec_level1_max)
-        out_dec_level1_max = self.decoder_level1_max3(inp_dec_level1_max)
-
-        out_dec_level1_max = self.output_max(out_dec_level1_max)
-
-        outputs.append(out_dec_level1_max)
-
-        return outputs[::-1]
-
-
 class EncoderTransformer(nn.Module):
     def __init__(self,
                  inp_channels=3,
@@ -513,30 +425,108 @@ class DecoderTransformer(nn.Module):
         out_ = self.output_max(out_dec_level1)
         return out_
 
+class HMU(nn.Module):
+    def __init__(self, in_c, num_groups=4, hidden_dim=None):
+        super().__init__()
+        self.num_groups = num_groups
+
+        hidden_dim = hidden_dim or in_c // 2
+        expand_dim = hidden_dim * num_groups
+        self.expand_conv = ConvBNReLU(in_c, expand_dim, 1)
+        self.gate_genator = nn.Sequential(
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Conv2d(num_groups * hidden_dim, hidden_dim, 1),
+            nn.ReLU(True),
+            nn.Conv2d(hidden_dim, num_groups * hidden_dim, 1),
+            nn.Softmax(dim=1),
+        )
+
+        self.interact = nn.ModuleDict()
+        self.interact["0"] = ConvBNReLU(hidden_dim, 3 * hidden_dim, 3, 1, 1)
+        for group_id in range(1, num_groups - 1):
+            self.interact[str(group_id)] = ConvBNReLU(2 * hidden_dim, 3 * hidden_dim, 3, 1, 1)
+        self.interact[str(num_groups - 1)] = ConvBNReLU(2 * hidden_dim, 2 * hidden_dim, 3, 1, 1)
+
+        self.fuse = nn.Sequential(nn.Conv2d(num_groups * hidden_dim, in_c, 3, 1, 1), nn.BatchNorm2d(in_c))
+        self.final_relu = nn.ReLU(True)
+
+    def forward(self, x):
+        xs = self.expand_conv(x).chunk(self.num_groups, dim=1)
+
+        outs = []
+
+        branch_out = self.interact["0"](xs[0])
+        outs.append(branch_out.chunk(3, dim=1))
+
+        for group_id in range(1, self.num_groups - 1):
+            branch_out = self.interact[str(group_id)](torch.cat([xs[group_id], outs[group_id - 1][1]], dim=1))
+            outs.append(branch_out.chunk(3, dim=1))
+
+        group_id = self.num_groups - 1
+        branch_out = self.interact[str(group_id)](torch.cat([xs[group_id], outs[group_id - 1][1]], dim=1))
+        outs.append(branch_out.chunk(2, dim=1))
+
+        out = torch.cat([o[0] for o in outs], dim=1)
+        gate = self.gate_genator(torch.cat([o[-1] for o in outs], dim=1))
+        out = self.fuse(out * gate)
+        return self.final_relu(out + x)
+
+class DecoderHMU(nn.Module):
+    def __init__(self,
+                 dim=48
+                 ):
+        super(DecoderHMU, self).__init__()
+        self.d3 = nn.Sequential(HMU((dim * 2 ** 2), num_groups=6, hidden_dim=32))
+        self.reduce_chan_level1 = nn.Conv2d(int(dim * 2 ** 1), int(dim * 1 ** 1), kernel_size=1, bias=True)
+        self.d2 = nn.Sequential(HMU((dim * 2 ** 1), num_groups=6, hidden_dim=32))
+        self.reduce_chan_level2 = nn.Conv2d(int(dim * 2 ** 2), int(dim * 2 ** 1), kernel_size=1, bias=True)
+        self.d1 = nn.Sequential(HMU((dim * 1 ** 1), num_groups=6, hidden_dim=32))
+        self.out_layer_00 = ConvBNReLU((dim * 1 ** 1), 32, 3, 1, 1)
+        self.out_layer_01 = nn.Conv2d(32, 1, 1)
+
+    def forward(self, feats):
+
+        x = self.d3(feats[-1])
+        x = self.reduce_chan_level2(x)
+        x = cus_sample(x, mode="scale", factors=2)
+        x = self.d2(x + feats[-2])
+        x = self.reduce_chan_level1(x)
+        x = cus_sample(x, mode="scale", factors=2)
+        x = self.d1(x + feats[-3])
+
+        logits = self.out_layer_01(self.out_layer_00(x))
+        return logits
+
 
 class DynamicFusion(nn.Module):
     def __init__(self,
                  inp_chanel,
-                 feature_levels=3,
+                 feature_levels=5,
                  ):
         super(DynamicFusion, self).__init__()
         self.feature_levels = feature_levels
+        self.loss_Func = nn.L1Loss()
         for i in range(feature_levels):
-            setattr(self, f'fusion_stage{i}', DetailNode(inp_chanel * (2 ** i), 1))
-            setattr(self, f'INR{i}', INR(1).cuda())
+            setattr(self, f'fusion_stage{i}', DetailNode(inp_chanel, 1))
+            setattr(self, f'INR{i}', INR(2).cuda())
 
     def forward(self, rgb_feature_list, thermal_feature_list):
         fused_list = []
+        loss_NR = 0;
         for i in range(self.feature_levels):
             xr = rgb_feature_list[i]
             xt = thermal_feature_list[i]
             gate = getattr(self, f'fusion_stage{i}')
-            dynamic = gate(xr, xt).sigmoid()
+            dynamic = (gate(xr, xt))
             INR_Trans = getattr(self, f'INR{i}')
-            dynamic = (dynamic + INR_Trans(dynamic)).sigmoid()
-            fused = xr * dynamic + xt * (1 - dynamic)
+            dynamic_NR = INR_Trans(dynamic)
+            # loss_NR += self.loss_Func(dynamic, dynamic_NR)
+            dynamic_NR = dynamic_NR.chunk(2, dim=1)
+            dynamic_xr = (torch.abs(dynamic_NR[0]) + 1e-30) / (torch.abs(dynamic_NR[0]) + torch.abs(dynamic_NR[1]) + 1e-30)
+            dynamic_xt = (torch.abs(dynamic_NR[1]) + 1e-30) / (torch.abs(dynamic_NR[0]) + torch.abs(dynamic_NR[1]) + 1e-30)
+            fused = xr * dynamic_xr + xt * dynamic_xt
             fused_list.append(fused)
-        return fused_list
+        return fused_list, loss_NR
 
 class Net(nn.Module):
     def __init__(self,
@@ -582,10 +572,47 @@ class Net(nn.Module):
         output = self.decoder(fusion_feature_list)
         return output.sigmoid()
 
+
+class Net_S(nn.Module):
+    def __init__(self,
+                 inp_channels=3,
+                 out_channels=1,
+                 dim=48,
+                 num_blocks=[2, 3, 3],
+                 heads=[1, 2, 4],
+                 ffn_expansion_factor=2.66,
+                 bias=False,
+                 LayerNorm_type='WithBias',
+                 ):
+        super(Net_S, self).__init__()
+        self.encoder = EncoderTransformer(
+            inp_channels=inp_channels,
+            dim=dim,
+            num_blocks=num_blocks,
+            heads=heads,
+            ffn_expansion_factor=ffn_expansion_factor,
+            bias=bias,
+            LayerNorm_type=LayerNorm_type,
+        )
+        self.fusion_layers = DynamicFusion(
+            inp_chanel=dim,
+            feature_levels=len(num_blocks)
+        )
+        self.decoder = DecoderHMU(dim)
+
+    def forward(self, xr, xt):
+        rgb_feature_list = self.encoder(xr)
+        thermal_feature_list = self.encoder(xt)
+
+        fusion_feature_list = self.fusion_layers(rgb_feature_list, thermal_feature_list)
+
+        output = self.decoder(fusion_feature_list)
+        return output.sigmoid()
+
 if __name__ == '__main__':
     img_rgb, img_thermal = torch.randn(1, 3, 384, 384), torch.randn(1, 3, 384, 384)
     img_rgb = img_rgb.to(torch.device('cuda:0'))
     img_thermal = img_thermal.to(torch.device('cuda:0'))
-    model = Net().cuda()
+    model = Net_S().cuda()
     model(img_rgb, img_thermal)
     print('a')

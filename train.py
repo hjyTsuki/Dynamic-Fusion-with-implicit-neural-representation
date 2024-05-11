@@ -1,6 +1,8 @@
 import json
 import os
 
+from torch.nn.parallel import DistributedDataParallel
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"] = '0'
 
@@ -19,7 +21,7 @@ import numpy as np
 import utils
 from data_RGB import get_training_data, get_validation_data
 # from methods.vit import ViT as myNet
-from methods.net import Net as myNet
+from methods.net import Net_S as myNet
 import losses
 from warmup_scheduler import GradualWarmupScheduler
 from tqdm import tqdm
@@ -48,7 +50,7 @@ parser.add_argument('--mode', default='Salient', type=str)
 parser.add_argument('--session', default='SingleScale', type=str, help='session')
 parser.add_argument('--patch_size', default=256, type=int, help='patch size')
 parser.add_argument('--num_epochs', default=100, type=int, help='num_epochs')
-parser.add_argument('--batch_size', default=1, type=int, help='batch_size')
+parser.add_argument('--batch_size', default=2, type=int, help='batch_size')
 args = parser.parse_args()
 
 mode = args.mode
